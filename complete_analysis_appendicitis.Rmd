@@ -657,7 +657,7 @@ patho$pathology_mod2 <- factor(patho$pathology_mod2)
 patho$lib_prep_batch <- factor(patho$lib_prep_batch)
 
 
-set.seed(2128)
+set.seed(2000)
 
 # Select top 1000 features having the highest gene-wise variances in order to decrease computational cost
 vars <- sort(apply(ddsMLSeq.df, 1, var, na.rm = TRUE), decreasing=TRUE)
