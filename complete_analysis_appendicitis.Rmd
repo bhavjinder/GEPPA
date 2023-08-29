@@ -1,0 +1,1073 @@
+---
+title: "Appendicitis - Complete Analysis"
+author: "Bhavjinder Kaur Dhillon"
+date: "Feb 10, 2022"
+output:
+  html_document:
+    toc: true
+    theme: united
+---
+
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE)
+knitr::opts_chunk$set(message = FALSE)
+knitr::opts_chunk$set(warning = FALSE)
+
+library(knitr)
+library(tidyverse)
+library(janitor)
+library(RColorBrewer)
+library(DESeq2)
+library(gplots)
+library(ggplot2)
+library(ggrepel)
+library(ggpubr)
+library(sigora)
+library(UpSetR)
+library(pheatmap)
+library(magrittr)
+library(biomaRt)
+library(genefilter)
+library(BiocParallel)
+register(MulticoreParam(4))
+library(readxl)
+library(zoo)
+library(limma)
+library(MLSeq)
+library(VennDiagram)
+library(org.Hs.eg.db)
+
+
+
+ctDir = "../counts"
+
+
+mycols = c("NAAP"="#374F56", "PA" = "#DF8F43", "SA"="#10A1D5")
+
+
+```
+
+
+
+```{r metadata}
+
+## Set up the meta data file
+samples <- read.csv("../../meta_data/RNA_Sequencing_Samples_batch1_v4.csv", header = TRUE) %>%
+  clean_names()
+samples <- samples %>%
+  filter(seq_batch=="201810") %>%
+  filter(!(id==133)) 
+
+# Create new variables and re-order
+samples <- mutate(samples, countfile=paste0(id,".count"))
+samples$pathology <- str_replace_all(samples$pathology, "no", "NAAP")
+samples <- mutate(samples, pathology_mod=ifelse(pathology=="SA" | pathology=="PA", "App", "NAAP"))
+samples <- mutate(samples, pathology_mod2=ifelse(pathology=="PA", "PA", "SA_NAAP"))
+samples <- samples %>% relocate(countfile, .after="id")
+
+# Factor columns
+samples$pathology <- factor(samples$pathology, levels=c("SA","PA","NAAP"))
+samples$seq_batch <- factor(samples$seq_batch)
+samples$lib_prep_batch <- factor(samples$lib_prep_batch)
+samples$antibiotics_before_blood_drawn <- factor(samples$antibiotics_before_blood_drawn)
+samples$pathology_mod2 <- factor(samples$pathology_mod2)
+
+
+ggplot(samples, aes(x=age,fill=pathology)) +
+  geom_histogram(binwidth = 1) +
+  scale_fill_manual(values=mycols) +
+  facet_wrap(~pathology) + 
+  theme_bw(base_size=14)
+
+ggplot(samples, aes(x=sex,fill=pathology)) +
+  geom_bar()+
+  scale_fill_manual(values=mycols) +
+  theme_bw(base_size=14)
+
+
+```
+
+
+As outlined previously, a total of 72 samples were sequenced in the first batch of the appendicitis study. Sample 133 was removed from the study as the RNAseq library did not produce enough reads.
+
+The breakdown of the remaining 71 samples is as follows:
+(SA = simple appendicitis; PA = perforated appendicitis; no = no appendicitis)
+
+```{r}
+breakdown <- samples %>%
+  dplyr::count(pathology, sex) %>%
+  spread(sex, n) %>%
+  mutate(Total=Female+Male)
+
+kable(breakdown)
+
+```
+
+
+# Transcriptomic Analysis
+
+### Quality control
+
+Sequence quality was assessed using FastQC and looks great for all libraries. The following image highlights the sequence quality across the length of the read. We don't see any large drops in quality, which is great.
+
+![](../multiqc/multiqc_data/fastqc_per_base_sequence_quality_plot.png)
+
+##### Read alignments and counts
+
+STAR (version 2.6.0c) was used to align reads against the reference human genome (Genome Reference Consortium Human Build 38) and the number of reads assigned to each gene were tabulated using HTSeq (version 0.9.1). As mentioned previously, sample 133 did not produce enough reads to meet the minimum threshold (1 million reads) and was not included in any subsequent analyses.
+
+The figure below summarizes the reads that were assigned to a gene for each sample. We were able to capture great read counts for each sample, and there are 4 samples that are considerably larger than the rest (>90 million reads).
+
+![](../multiqc/multiqc_data/htseq_assignment_plot.png)
+
+
+
+```{r dds}
+
+# Read count data into DESeq object
+ddsHTSeq <- DESeqDataSetFromHTSeqCount(sampleTable = samples, directory = ctDir, design = ~ pathology)
+
+# Removing globin genes from htseq count matrix
+exclude <- c("ENSG00000206172", "ENSG00000188536", "ENSG00000244734", "ENSG00000223609", "ENSG00000213934", "ENSG00000196565")
+ddsHTSeq <- ddsHTSeq[(!(rownames(ddsHTSeq) %in% exclude)),]
+
+# Remove low count genes
+keep <- rowSums(counts(ddsHTSeq)>10) >= 24
+ddsHTSeq <- ddsHTSeq[keep,]
+
+# VST normalization
+vsd <- vst(ddsHTSeq)
+
+
+
+```
+
+##### Principal Component Analysis (PCA)
+
+PCA plot after correcting for library prep batch:
+
+```{r pca_corrected}
+
+# Remove library prep batch effect
+assay(vsd) <- limma::removeBatchEffect(assay(vsd),vsd$lib_prep_batch)
+
+# Visualize using PCA
+data <- plotPCA(vsd, intgroup=c("pathology","sex","age","lib_prep_batch"), returnData=TRUE)
+percentVar <- round(100 * attr(data, "percentVar"))
+
+plot <- ggplot(data, aes(PC1, PC2, ID, color=pathology, fill=pathology, shape=sex)) +
+  scale_shape_manual(values=c(22,24), 
+                     name="Sex") +
+  geom_point(size=3) +
+ # geom_text(aes(label=name), size=3, hjust=0.5, vjust=1.5) +
+  scale_fill_manual(values=mycols, 
+                    labels=c("NAAP","PA","SA"),
+                    name="Pathology") +
+  scale_color_manual(values=mycols, 
+                    labels=c("NAAP","PA","SA"),
+                    name="Pathology") +
+  xlab(paste0("PC1: ",percentVar[1],"% variance")) +
+  ylab(paste0("PC2: ",percentVar[2],"% variance")) +
+  guides( color = guide_legend(order=1), 
+          shape= guide_legend(order=2),
+          fill= FALSE) +
+  theme_bw()
+plot
+ggsave("../results/PCA_corrected_lib_prep_batch_2022.png")
+
+
+```
+
+
+
+```{r pcatools, eval=FALSE}
+
+p <- pca(vsd, metadata = colData(ddsHTSeq))
+
+screeplot(p, axisLabSize = 18, titleLabSize = 22)
+
+```
+
+##### Hierarchical clustering
+
+The figure below is generated from hierarchical clustering based on the euclidean distance of normalized gene expression counts across the samples :
+
+```{r clustering}
+#set colours
+hmcol <- colorRampPalette(brewer.pal(9, "RdBu"))(100)
+sidecols <- mycols[vsd$pathology]
+
+# Create a heatmap comparing the distance between samples based on the normalized log2foldchange of DE genes
+# dist is a distance matrix computation to measure distance between the rows of a data matrix (sample to sample distance in this case)
+# t returns the transpose of a matrix/data.frame (ie. switch the rows and columns)
+# assay is part of SummarizedExperiment object, matrix-like container, rows represent featuers (eg. genes, transcripts) and columns represent samples
+distsRL <- dist(t(assay(vsd)))
+mat <- as.matrix(distsRL)
+rownames(mat) <- colnames(mat) <- with(colData(ddsHTSeq), paste(sex))
+
+heatmap.2(mat, trace="none", 
+          col=rev(hmcol), 
+          ColSideColors=sidecols, 
+          labRow=TRUE, 
+          mar=c(10,2), 
+          key.title="Legend")
+legend(x=-0.1, y=0.95, 
+       xpd=TRUE, 
+       legend = c("NAAP","PA","SA"), 
+       col = mycols, 
+       lty= 1, lwd = 5, cex=.7)
+```
+
+
+
+### Differential Gene Expression Analysis
+
+DESeq2 was used to calculate DE genes between comparison groups.
+Globin genes were filtered out of the count matrix as these are very highly expressed and influence the normalization process and reduce the ability to detect differences in genes with low overall expression.
+Low count genes were also filtered prior to DE analysis. These were defined as genes with less than 10 mapped reads across a minimum of 24 samples.
+DE genes were defined as genes with absolute fold-change >= 1.5 and adjusted p-value < 0.05 between comparison groups.
+
+### PA vs. NAAP, SA vs. NAAP
+
+```{r deseq2_analysis}
+# Read count data into DESeq object
+ddsHTSeq <- DESeqDataSetFromHTSeqCount(sampleTable = samples, directory = ctDir, design = ~ lib_prep_batch + sex + pathology)
+
+# Removing globin genes from htseq count matrix
+exclude <- c("ENSG00000206172", "ENSG00000188536", "ENSG00000244734", "ENSG00000223609", "ENSG00000213934", "ENSG00000196565")
+ddsHTSeq <- ddsHTSeq[(!(rownames(ddsHTSeq) %in% exclude)),]
+
+# Remove genes with low counts
+keep <- rowSums(counts(ddsHTSeq)>10) >= 24
+ddsHTSeq <- ddsHTSeq[keep,]
+
+# Relevel the controls
+ddsHTSeq$pathology <- relevel(ddsHTSeq$pathology, ref="NAAP")
+
+# Run DESeq2
+dds <- DESeq(ddsHTSeq, betaPrior = FALSE, parallel=TRUE)
+res <- results(dds, parallel=TRUE)
+
+# Determine DE genes
+# contrasts should come from resultsNames(dds)
+res_dds_SA <- results(dds, contrast = list("pathology_SA_vs_NAAP"))
+res_dds_PA <- results(dds, contrast = list("pathology_PA_vs_NAAP"))
+
+# Order the results by q-value
+res_ord_SA <- res_dds_SA[order(res_dds_SA$padj),]
+res_ord_PA <- res_dds_PA[order(res_dds_PA$padj),]
+
+# Add two additional columns: absolute log2 fold change (abslfc), and fold change (FC)
+res_ord_SA$abslfc <- abs(res_ord_SA$log2FoldChange)
+res_ord_PA$abslfc <- abs(res_ord_PA$log2FoldChange)
+
+res_ord_SA$fc <- (sign(res_ord_SA$log2FoldChange) * (2^ res_ord_SA$abslfc))
+res_ord_PA$fc <- (sign(res_ord_PA$log2FoldChange) * (2^ res_ord_PA$abslfc))
+
+#Convert DE gene ensembl IDs to HGNC symbols
+
+res_ord_SA.hgnc <- as.matrix(rownames(res_ord_SA))
+symbols <- mapIds(org.Hs.eg.db, keys = res_ord_SA.hgnc,
+    column = c('SYMBOL'), keytype = 'ENSEMBL')
+#symbols <- symbols[!is.na(symbols)]
+symbols <- symbols[match(res_ord_SA.hgnc, names(symbols))]
+res_ord_SA$hgnc <- symbols
+
+res_ord_PA.hgnc <- as.matrix(rownames(res_ord_PA))
+symbols <- mapIds(org.Hs.eg.db, keys = res_ord_PA.hgnc,
+    column = c('SYMBOL'), keytype = 'ENSEMBL')
+#symbols <- symbols[!is.na(symbols)]
+symbols <- symbols[match(res_ord_PA.hgnc, names(symbols))]
+res_ord_PA$hgnc <- symbols
+
+
+# Write initial results to a .csv file
+write.csv(res_ord_SA, file="../deseq2/Results_SA_vs_no.csv")
+write.csv(res_ord_PA, file="../deseq2/Results_PA_vs_no.csv")
+
+# Filter DE gene list for ((fc >= 1.5 | fc <= -1.5) and q-value < 0.05)
+degenes_SA <- as.data.frame(subset(res_ord_SA, padj<=0.05 & (fc >= 1.5 | fc <= -1.5)))
+degenes_PA <- as.data.frame(subset(res_ord_PA, padj<=0.05 & (fc >= 1.5 | fc <= -1.5)))
+
+
+
+
+# Write filtered DE genes results to a .csv file
+write.csv(degenes_SA, file="../deseq2/DEGenes_SA_vs_no.csv")
+write.csv(degenes_PA, file="../deseq2/DEGenes_PA_vs_no.csv")
+
+```
+
+### PA vs. SA+NAAP
+
+```{r deseq2_pa_vs_sanaap}
+
+# Read count data into DESeq object
+ddsHTSeq_pa_vs_all <- DESeqDataSetFromHTSeqCount(sampleTable = samples, directory = ctDir, design = ~ lib_prep_batch + sex + pathology_mod2)
+
+# Removing globin genes from htseq count matrix
+exclude <- c("ENSG00000206172", "ENSG00000188536", "ENSG00000244734", "ENSG00000223609", "ENSG00000213934", "ENSG00000196565")
+ddsHTSeq_pa_vs_all <- ddsHTSeq_pa_vs_all[(!(rownames(ddsHTSeq_pa_vs_all) %in% exclude)),]
+
+# Remove low count genes
+keep_pa_vs_all <- rowSums(counts(ddsHTSeq_pa_vs_all)>10) >= 24
+ddsHTSeq_pa_vs_all <- ddsHTSeq_pa_vs_all[keep_pa_vs_all,]
+
+
+# Relevel the controls
+ddsHTSeq_pa_vs_all$pathology_mod2 <- relevel(ddsHTSeq_pa_vs_all$pathology_mod2, ref="SA_NAAP")
+
+# Run DESeq2
+dds_pa_vs_all <- DESeq(ddsHTSeq_pa_vs_all, betaPrior = FALSE, parallel=TRUE)
+res_pa_vs_all <- results(dds_pa_vs_all, parallel=TRUE)
+
+# Determine DE genes
+res_dds_pa_vs_all <- results(dds_pa_vs_all, contrast = list("pathology_mod2_PA_vs_SA_NAAP"))
+
+# Order the results by q-value
+res_ord_pa_vs_all <- res_dds_pa_vs_all[order(res_dds_pa_vs_all$padj),]
+
+# Add two additional columns: absolute log2 fold change (abslfc), and fold change (FC)
+res_ord_pa_vs_all$abslfc <- abs(res_ord_pa_vs_all$log2FoldChange)
+res_ord_pa_vs_all$fc <- (sign(res_ord_pa_vs_all$log2FoldChange) * (2^ res_ord_pa_vs_all$abslfc))
+
+#Convert DE gene ensembl IDs to HGNC symbols
+res_ord_pa_vs_all.hgnc <- as.matrix(rownames(res_ord_pa_vs_all))
+symbols <- mapIds(org.Hs.eg.db, keys = res_ord_pa_vs_all.hgnc,
+    column = c('SYMBOL'), keytype = 'ENSEMBL')
+#symbols <- symbols[!is.na(symbols)]
+symbols <- symbols[match(res_ord_pa_vs_all.hgnc, names(symbols))]
+res_ord_pa_vs_all$hgnc <- symbols
+
+
+
+# Write initial results to a .csv file
+write.csv(res_ord_pa_vs_all, file="../deseq2/Results_PA_vs_ALL.csv")
+
+# Filter DE gene list for (fc >= 1.5 | fc <= -1.5) and q-value < 0.05
+degenes_pa_vs_all <- as.data.frame(subset(res_ord_pa_vs_all, padj<=0.05 & (fc >= 1.5 | fc <= -1.5)))
+
+
+
+# Write filtered DE genes results to a .csv file
+write.csv(degenes_pa_vs_all, file="../deseq2/DEGenes_PA_vs_ALL.csv")
+
+```
+
+
+
+```{r deseq2_removed133_sa_vs_pa}
+
+# Read count data into DESeq object
+ddsHTSeq_sa_vs_pa <- DESeqDataSetFromHTSeqCount(sampleTable = samples, directory = ctDir, design = ~ lib_prep_batch + sex + pathology)
+
+# Removing globin genes from htseq count matrix
+exclude <- c("ENSG00000206172", "ENSG00000188536", "ENSG00000244734", "ENSG00000223609", "ENSG00000213934", "ENSG00000196565")
+ddsHTSeq_sa_vs_pa <- ddsHTSeq_sa_vs_pa[(!(rownames(ddsHTSeq_sa_vs_pa) %in% exclude)),]
+
+# Remove low count genes
+keep_sa_vs_pa <- rowSums(counts(ddsHTSeq_sa_vs_pa)>10) >= 24
+ddsHTSeq_sa_vs_pa <- ddsHTSeq_sa_vs_pa[keep_sa_vs_pa,]
+
+# Relevel the controls
+ddsHTSeq_sa_vs_pa$pathology <- relevel(ddsHTSeq_sa_vs_pa$pathology, ref="SA")
+
+# Run DESeq
+dds_sa_vs_pa <- DESeq(ddsHTSeq_sa_vs_pa, betaPrior = FALSE, parallel=TRUE)
+res_sa_vs_pa <- results(dds_sa_vs_pa, parallel=TRUE)
+
+# Determine DE genes
+res_dds_sa_vs_pa <- results(dds_sa_vs_pa, contrast = list("pathology_PA_vs_SA"))
+
+# Order the results by q-value
+res_ord_sa_vs_pa <- res_dds_sa_vs_pa[order(res_dds_sa_vs_pa$padj),]
+
+# Add two additional columns: absolute log2 fold change (abslfc), and fold change (FC)
+res_ord_sa_vs_pa$abslfc <- abs(res_ord_sa_vs_pa$log2FoldChange)
+res_ord_sa_vs_pa$fc <- (sign(res_ord_sa_vs_pa$log2FoldChange) * (2^ res_ord_sa_vs_pa$abslfc))
+
+#Convert DE gene ensembl IDs to HGNC symbols
+res_ord_sa_vs_pa.hgnc <- as.matrix(rownames(res_ord_sa_vs_pa))
+symbols <- mapIds(org.Hs.eg.db, keys = res_ord_sa_vs_pa.hgnc,
+    column = c('SYMBOL'), keytype = 'ENSEMBL')
+#symbols <- symbols[!is.na(symbols)]
+symbols <- symbols[match(res_ord_sa_vs_pa.hgnc, names(symbols))]
+res_ord_sa_vs_pa$hgnc <- symbols
+
+
+# Write initial results to a .csv file
+write.csv(res_ord_sa_vs_pa, file="../deseq2/Results_PA_vs_SA.csv")
+
+# Filter DE gene list for ((fc >= 1.5 | fc <= -1.5) and q-value < 0.05)
+degenes_sa_vs_pa <- as.data.frame(subset(res_ord_sa_vs_pa, padj<=0.05 & (fc >= 1.5 | fc <= -1.5)))
+
+
+
+
+# Write filtered DE genes results to a .csv file
+write.csv(degenes_sa_vs_pa, file="../deseq2/DEGenes_PA_vs_SA.csv")
+
+```
+
+
+
+
+
+###### Summary of DE genes identified:
+
+```{r}
+
+summ_PA <- degenes_PA %>%
+  dplyr::count(fc>0) %>%
+  transmute(PA_vs_no=n)
+
+#summ_SA <- degenes_SA %>%
+#   dplyr::count(fc>0) %>%
+#   transmute(SA_vs_no=n)
+SA_vs_no <- c(0,0)
+
+summ_PA_vs_SA <- degenes_sa_vs_pa %>%
+ dplyr::count(fc>0) %>%
+ transmute(PA_vs_SA=n)
+# 
+# summ_app_vs_no <- degenes_app_vs_no %>%
+#  dplyr::count(fc>0) %>%
+#  transmute(Any_appy_vs_no=n)
+
+summ_pa_vs_all <- degenes_pa_vs_all %>%
+  dplyr::count(fc>0) %>%
+  transmute(PA_vs_All=n)
+
+
+summ <- cbind(SA_vs_no, summ_PA, summ_PA_vs_SA, summ_pa_vs_all)
+rownames(summ) <- c("Number of down-regulated genes","Number of up-regulated genes")
+
+summ <- t(summ)
+
+kable(summ)
+
+
+```
+
+
+The SA group closely resembles the control/no group and there are no DE genes identified after correcting for batch. However, the PA group has a large set of DE genes compared to the control group. If we directly compare PA to the SA group (without control group), we have a small set of DE genes. If we combine both the SA and PA group (any appendicitis) and compare to the control group, there are also a set of significant DE genes.
+
+### Pathway Enrichment Analysis
+
+Pathway enrichment analysis uses the lists of DE genes to identify the pathways in which these DE genes are significantly over-represented. This can provide insight into the larger biological mechanisms that may be at play when making comparisons between the various groups of patients. SIGORA was used to look at over-represented pathways curated in the Reactome pathways database (https://reactome.org). The table below summarizes the total number of pathways identified.
+
+
+
+```{r sigora}
+
+# Read in Level 1 and 2 Reactome pathway categories
+reactome_HSA_L1_L2 <- readRDS("reactome_categories_HSA_L1_L2.Rds") %>%
+  mutate(pathwy.id = id) %>% 
+  dplyr::select(pathwy.id, level_1, level_2) 
+
+######### PA vs no
+
+
+sigRes_PA <- sigora(GPSrepo=load_data('reaH'), 
+                    queryList = rownames(degenes_PA), 
+                    level=4, markers=TRUE, 
+                    saveFile="../pathway/SIGORA_ReaH_PA_vs_NAAP.csv")
+
+sigRes_PA$summary_results <- mutate(sigRes_PA$summary_results, source="PA_vs_NAAP") %>%
+  filter(Bonferroni<=0.05) 
+
+
+degenes_PA_up <- filter(degenes_PA, fc>0)
+degenes_PA_down <- filter(degenes_PA, fc<0)
+
+sigRes_PA_up <- sigora(GPSrepo=load_data('reaH'), 
+                    queryList = rownames(degenes_PA_up), 
+                    level=4, markers=TRUE, 
+                    saveFile="../pathway/SIGORA_ReaH_PA_vs_NAAP_UP.csv")
+
+sigRes_PA_up$summary_results <- mutate(sigRes_PA_up$summary_results, source="PA_vs_NAAP") %>%
+  filter(Bonferroni<=0.05) %>%
+  mutate(Direction="Up-regulated")
+
+
+sigRes_PA_down <- sigora(GPSrepo=load_data('reaH'), 
+                    queryList = rownames(degenes_PA_down), 
+                    level=4, markers=TRUE, 
+                    saveFile="../pathway/SIGORA_ReaH_PA_vs_NAAP_DOWN.csv")
+
+sigRes_PA_down$summary_results <- mutate(sigRes_PA_down$summary_results, source="PA_vs_NAAP") %>%
+  filter(Bonferroni<=0.05) %>%
+  mutate(Direction="Down-regulated")
+
+
+######## PA vs all
+
+
+sigRes_PA_vs_all <- sigora(GPSrepo=load_data('reaH'), 
+                           queryList = rownames(degenes_pa_vs_all), 
+                           level=4, markers=TRUE, 
+                           saveFile="../pathway/SIGORA_ReaH_PA_vs_ALL.csv")
+
+sigRes_PA_vs_all$summary_results <- mutate(sigRes_PA_vs_all$summary_results, source="PA_vs_ALL") %>%
+  filter(Bonferroni<=0.05) 
+
+degenes_PA_vs_all_up <- filter(degenes_pa_vs_all, fc>0)
+degenes_PA_vs_all_down <- filter(degenes_pa_vs_all, fc<0)
+
+sigRes_PA_vs_all_up <- sigora(GPSrepo=load_data('reaH'), 
+                           queryList = rownames(degenes_PA_vs_all_up), 
+                           level=4, markers=TRUE, 
+                           saveFile="../pathway/SIGORA_ReaH_PA_vs_ALL_UP.csv")
+
+sigRes_PA_vs_all_up$summary_results <- mutate(sigRes_PA_vs_all_up$summary_results, source="PA_vs_ALL") %>%
+  filter(Bonferroni<=0.05) %>%
+  mutate(Direction="Up-regulated")
+
+
+sigRes_PA_vs_all_down <- sigora(GPSrepo=load_data('reaH'), 
+                           queryList = rownames(degenes_PA_vs_all_down), 
+                           level=4, markers=TRUE, 
+                           saveFile="../pathway/SIGORA_ReaH_PA_vs_ALL_DOWN.csv")
+
+sigRes_PA_vs_all_down$summary_results <- mutate(sigRes_PA_vs_all_down$summary_results, source="PA_vs_ALL") %>%
+  filter(Bonferroni<=0.05) %>%
+  mutate(Direction="Down-regulated")
+
+
+
+######## PA vs SA
+
+
+sigRes_SA <- sigora(GPSrepo=load_data('reaH'), 
+                 queryList = rownames(degenes_sa_vs_pa), 
+                 level=4, markers=TRUE, 
+                 saveFile="../pathway/SIGORA_ReaH_PA_vs_SA.csv")
+
+sigRes_SA$summary_results <- mutate(sigRes_SA$summary_results, source="PA_vs_SA") %>%
+  filter(Bonferroni<=0.05)
+
+
+degenes_PA_vs_SA_up <- filter(degenes_sa_vs_pa, fc>0)
+degenes_PA_vs_SA_down <- filter(degenes_sa_vs_pa, fc<0)
+
+sigRes_up <- sigora(GPSrepo=load_data('reaH'), 
+                 queryList = rownames(degenes_PA_vs_SA_up), 
+                 level=4, markers=TRUE, 
+                 saveFile="../pathway/SIGORA_ReaH_PA_vs_SA_UP.csv")
+
+sigRes_up$summary_results <- mutate(sigRes_up$summary_results, source="PA_vs_SA") %>%
+  filter(Bonferroni<=0.05) %>%
+  mutate(Direction="Up-regulated")
+
+sigRes_down <- sigora(GPSrepo=load_data('reaH'), 
+                 queryList = rownames(degenes_PA_vs_SA_down), 
+                 level=4, markers=TRUE, 
+                 saveFile="../pathway/SIGORA_ReaH_PA_vs_SA_DOWN.csv")
+
+sigRes_down$summary_results <- mutate(sigRes_down$summary_results, source="PA_vs_SA") %>%
+  filter(Bonferroni<=0.05) %>%
+  mutate(Direction="Down-regulated")
+
+
+######### Combine
+
+sigora_all <- bind_rows(sigRes_PA_up$summary_results, 
+                        sigRes_PA_down$summary_results,
+                        sigRes_up$summary_results,
+                        sigRes_down$summary_results,
+                        sigRes_PA_vs_all_up$summary_results,
+                        sigRes_PA_vs_all_down$summary_results)
+
+sigora_all <- left_join(sigora_all, reactome_HSA_L1_L2, by="pathwy.id")
+
+sigora_all$source <- factor(sigora_all$source, 
+                            levels = c("PA_vs_NAAP", 
+                                       "PA_vs_SA", 
+                                       "PA_vs_ALL"))
+
+sigora_all %>%
+  mutate(Pathway=fct_reorder(description, Bonferroni, .desc=TRUE)) %>%
+  ggplot(aes(source, Pathway, level_1, fill=Direction, shape=Direction)) +
+  geom_point(size = 3) +
+  scale_fill_manual(values=c("Up-regulated"="#d44660", "Down-regulated"="#43a2a3")) +
+  scale_shape_manual(values=c("Up-regulated"=24, "Down-regulated"=25)) +
+  labs(x = "", y = "", title = "") +
+  #scale_y_discrete(labels = function(x) str_wrap(x, width=80)) +
+  theme(axis.text.x = element_text(size=14, angle = 45, hjust = 1), 
+         axis.text.y = element_text(size=14),
+        strip.text.y = element_text(angle = 0, size=12)) +
+  facet_grid (rows=vars(level_1), scales="free_y", space="free_y")
+ggsave("../pathway/SIGORA_directionality.png", width=13, height=16)
+
+
+sigora_all %>%
+  filter(level_1=="Immune System") %>%
+  mutate(Pathway=fct_reorder(description, Bonferroni, .desc=TRUE)) %>%
+  ggplot(aes(source, Pathway, level_1, fill=Direction, shape=Direction)) +
+  geom_point(size = 3) +
+  scale_fill_manual(values=c("Up-regulated"="#d44660", "Down-regulated"="#43a2a3")) +
+  scale_shape_manual(values=c("Up-regulated"=24, "Down-regulated"=25)) +
+  labs(x = "", y = "", title = "") +
+  #scale_y_discrete(labels = function(x) str_wrap(x, width=80)) +
+  theme(axis.text.x = element_text(size=14, angle = 45, hjust = 1), 
+         axis.text.y = element_text(size=14),
+        strip.text.y = element_text(angle = 0, size=12))
+ggsave("../pathway/SIGORA_ImmuneSystemPathwaysOnly.png", width=11, height=7)
+
+
+
+sigora_all %>%
+  filter(level_1=="Immune System" | level_1=="Signal Transduction") %>%
+  mutate(Pathway=fct_reorder(description, Bonferroni, .desc=TRUE)) %>%
+  ggplot(aes(source, Pathway, level_1, fill=Direction, shape=Direction)) +
+  geom_point(size = 3) +
+  scale_fill_manual(values=c("Up-regulated"="#d44660", "Down-regulated"="#43a2a3")) +
+  scale_shape_manual(values=c("Up-regulated"=24, "Down-regulated"=25)) +
+  labs(x = "", y = "", title = "") +
+  #scale_y_discrete(labels = function(x) str_wrap(x, width=80)) +
+  theme(axis.text.x = element_text(size=14, angle = 45, hjust = 1), 
+         axis.text.y = element_text(size=14),
+        strip.text.y = element_text(angle = 0, size=14)) + 
+   facet_grid(rows=vars(level_1), scales="free_y", space="free_y")
+ggsave("../pathway/SIGORA_ImmuneSystemSigTransOnly.png", width=12, height=10)
+
+
+
+```
+
+
+
+
+### Machine learning 
+
+In this step, I'd like to use machine learning methods to identify potential biomarkers for PA. To do this, I need to split the dataset into training and testing cohorts. I decided to split the samples 70%/30% for training (49 samples) and testing (22 samples) so that we can perform an internal validation (an independent external validation cohort was not available). 
+
+```{r mlseq_transcriptomic}
+
+# Read in raw counts
+ddsMLSeq.df <- as.data.frame(assay(ddsHTSeq))
+
+# Read in metadata columns
+patho <- as.data.frame(cbind(samples$id, as.data.frame(samples$pathology), samples$lib_prep_batch, as.data.frame(samples$pathology_mod2)))
+colnames(patho) <- c("id", "pathology","lib_prep_batch", "pathology_mod2")
+# Factor columns
+patho$pathology <- factor(patho$pathology)
+patho$pathology_mod2 <- factor(patho$pathology_mod2)
+patho$lib_prep_batch <- factor(patho$lib_prep_batch)
+
+
+set.seed(2128)
+
+# Select top 1000 features having the highest gene-wise variances in order to decrease computational cost
+vars <- sort(apply(ddsMLSeq.df, 1, var, na.rm = TRUE), decreasing=TRUE)
+data <- ddsMLSeq.df[names(vars)[1:1000], ]
+
+# Select random sampling for training/test datasets (70% training, 30% test)
+nTest <- ceiling(ncol(data) * 0.3)
+ind <- sample(ncol(data), nTest, FALSE)
+data.train <- as.matrix(data[ , -ind] + 1)
+data.test <- as.matrix(data[ , ind] + 1)
+classtr <- DataFrame(patho[-ind, 4:3])
+classts <- DataFrame(patho[ind, 4:3])
+
+
+# Training set as a deseq object
+data.trainS4 <- DESeqDataSetFromMatrix(countData = data.train, colData = classtr, design = formula(~ lib_prep_batch + pathology_mod2))
+
+# Testing set as a deseq object
+data.testS4 <- DESeqDataSetFromMatrix(countData = data.test, colData = classts, design = formula(~ lib_prep_batch + pathology_mod2))
+
+
+# Define control list
+cont.voom <- voomControl(method = "repeatedcv", number = 5, repeats = 10, tuneLength = 10)
+# Fit voomNSC classifier
+fit.voomNSC <- classify(data=data.trainS4, method="voomNSC", normalize="deseq", ref="PA", control=cont.voom)
+fit.voomNSC
+
+# Extract info from trained model
+trained.voom <- trained(fit.voomNSC)
+# Probabilities to calculate CIs
+trained.voom.probs <- trained.voom@finalModel[["model"]][["prob"]]
+
+confusionMat(fit.voomNSC)
+
+# Actual pathology categorizations
+actual <- data.testS4$pathology_mod2
+nn <- length(actual)
+
+actual
+ 
+# ML predictions
+pred.voomNSC <- predict(fit.voomNSC, data.testS4)
+pred.voomNSC
+
+diag.voomNSC <- sum(diag(table(pred.voomNSC, actual)))
+diag.voomNSC
+
+
+# Accuracy and sparsity
+acc <- c(diag.voomNSC) / nn
+sparsity <- c(length(selectedGenes(fit.voomNSC))/nrow(data.testS4))
+tbl <- data.frame(Classifier = c("voomNSC"), Accuracy = acc, Sparsity = sparsity)
+tbl
+
+
+```
+
+
+###### Extract possible biomarkers
+
+It's possible to select DE features which mostly contribute to the discrimination function by using built-in variable selection criteria using the sparse algorithms NSC and voomNSC. The following genes were selected as potential biomarker signature by voomNSC for predicting PA with an accuracy of 86%:
+
+```{r}
+sg.voomNSC <- selectedGenes(fit.voomNSC)
+sg.voomNSC
+
+#plotCounts(ddsHTSeq, gene="ENSG00000163221", intgroup = "pathology") # S100A12
+
+
+s100a12 <- plotCounts(ddsHTSeq, gene="ENSG00000163221", 
+                intgroup="pathology", 
+                returnData=TRUE)
+
+s100a12$pathology <- fct_relevel(s100a12$pathology, "NAAP", "SA", "PA")
+
+pairwise.wilcox.test(s100a12$count, s100a12$pathology, p.adjust.method = "BH")
+
+s <- ggplot(s100a12, aes(x=pathology, y=count, color=pathology)) + 
+  geom_boxplot(aes(x=pathology, y=count), show.legend=FALSE) + 
+  geom_jitter(alpha=0.7,width=0.1, show.legend=FALSE) +
+  scale_color_manual(values=mycols) +
+  scale_y_log10() +
+  geom_signif(comparisons = list(c("NAAP", "SA")), 
+            map_signif_level=c("***"=0.001,"**"=0.01, "*"=0.05, " "=2),
+            tip_length = 0.03,
+            margin_top = 0.4,
+            vjust = 0.5,
+            color="#000000") +
+  geom_signif(comparisons = list(c("NAAP", "PA")), 
+            map_signif_level=c("***"=0.001,"**"=0.01, "*"=0.05, " "=2),
+            tip_length = 0.03,
+            margin_top = 0.5,
+            vjust = 0.5,
+            color="#000000") +
+    geom_signif(comparisons = list(c("PA", "SA")), 
+            map_signif_level=c("***"=0.001,"**"=0.01, "*"=0.05, " "=2),
+            tip_length = 0.03,
+            margin_top = 0.3,
+            vjust = 0.5,
+            color="#000000") +
+  ggtitle("S100A12") +
+  xlab(" ") +
+  ylab(" ") +
+  theme_classic(base_size=16) +
+  theme(plot.title = element_text(size = 16))
+  #labs(color = "Pathology Group")
+  
+
+s100a8 <- plotCounts(ddsHTSeq, gene="ENSG00000143546", 
+                intgroup="pathology", 
+                returnData=TRUE)
+
+s100a8$pathology <- fct_relevel(s100a8$pathology, "NAAP", "SA", "PA")
+
+pairwise.wilcox.test(s100a8$count, s100a8$pathology, p.adjust.method = "BH")
+
+s2 <- ggplot(s100a8, aes(x=pathology, y=count, color=pathology)) + 
+  geom_boxplot(aes(x=pathology, y=count), show.legend=FALSE) + 
+  geom_jitter(alpha=0.7,width=0.1, show.legend=FALSE) +
+  scale_color_manual(values=mycols) +
+  scale_y_log10() +
+  geom_signif(comparisons = list(c("NAAP", "SA")), 
+            map_signif_level=c("***"=0.001,"**"=0.01, "*"=0.05, " "=2),
+            tip_length = 0.03,
+            margin_top = 0.4,
+            vjust = 0.5,
+            color="#000000") +
+  geom_signif(comparisons = list(c("NAAP", "PA")), 
+            map_signif_level=c("***"=0.001,"**"=0.01, "*"=0.05, " "=2),
+            tip_length = 0.03,
+            margin_top = 0.5,
+            vjust = 0.5,
+            color="#000000") +
+    geom_signif(comparisons = list(c("PA", "SA")), 
+            map_signif_level=c("***"=0.001,"**"=0.01, "*"=0.05, " "=2),
+            tip_length = 0.03,
+            margin_top = 0.3,
+            vjust = 0.5,
+            color="#000000") +
+  ggtitle("S100A8") +
+  xlab(" ") +
+  ylab(" ") +
+  theme_classic(base_size=16) +
+  theme(plot.title = element_text(size = 16))
+  #labs(color = "Pathology Group")
+  
+
+
+plbd1 <- plotCounts(ddsHTSeq, gene="ENSG00000121316", 
+                intgroup="pathology", 
+                returnData=TRUE)
+
+
+plbd1$pathology <- fct_relevel(plbd1$pathology, "NAAP", "SA", "PA")
+
+pairwise.wilcox.test(plbd1$count, plbd1$pathology, p.adjust.method = "BH")
+
+p <- ggplot(anxa3, aes(x=pathology, y=count, color=pathology)) + 
+  geom_boxplot(aes(x=pathology, y=count), show.legend=FALSE) + 
+  geom_jitter(alpha=0.7,width=0.1, show.legend=FALSE) +
+  scale_color_manual(values=mycols) +
+  scale_y_log10() +
+  geom_signif(comparisons = list(c("NAAP", "SA")), 
+            map_signif_level=c("***"=0.001,"**"=0.01, "*"=0.05, " "=2),
+            tip_length = 0.03,
+            margin_top = 0.4,
+            vjust = 0.5,
+            color="#000000") +
+  geom_signif(comparisons = list(c("NAAP", "PA")), 
+            map_signif_level=c("***"=0.001,"**"=0.01, "*"=0.05, " "=2),
+            tip_length = 0.03,
+            margin_top = 0.5,
+            vjust = 0.5,
+            color="#000000") +
+    geom_signif(comparisons = list(c("PA", "SA")), 
+            map_signif_level=c("***"=0.001,"**"=0.01, "*"=0.05, " "=2),
+            tip_length = 0.03,
+            margin_top = 0.3,
+            vjust = 0.5,
+            color="#000000") +
+  ggtitle("PLBD1") +
+  xlab(" ") +
+  ylab(" ") +
+  theme_classic(base_size = 16) +
+  theme(plot.title = element_text(size = 16))
+  #labs(color = "Pathology Group")
+
+
+
+anxa3 <- plotCounts(ddsHTSeq, gene="ENSG00000138772", 
+                intgroup="pathology", 
+                returnData=TRUE)
+
+
+anxa3$pathology <- fct_relevel(anxa3$pathology, "NAAP", "SA", "PA")
+
+pairwise.wilcox.test(anxa3$count, anxa3$pathology, p.adjust.method = "BH")
+
+a <- ggplot(anxa3, aes(x=pathology, y=count, color=pathology)) + 
+  geom_boxplot(aes(x=pathology, y=count), show.legend=FALSE) + 
+  geom_jitter(alpha=0.7,width=0.1, show.legend=FALSE) +
+  scale_color_manual(values=mycols) +
+  scale_y_log10() +
+  geom_signif(comparisons = list(c("NAAP", "SA")), 
+            map_signif_level=c("***"=0.001,"**"=0.01, "*"=0.05, " "=2),
+            tip_length = 0.03,
+            margin_top = 0.4,
+            vjust = 0.5,
+            color="#000000") +
+  geom_signif(comparisons = list(c("NAAP", "PA")), 
+            map_signif_level=c("***"=0.001,"**"=0.01, "*"=0.05, " "=2),
+            tip_length = 0.03,
+            margin_top = 0.5,
+            vjust = 0.5,
+            color="#000000") +
+    geom_signif(comparisons = list(c("PA", "SA")), 
+            map_signif_level=c("***"=0.001,"**"=0.01, "*"=0.05, " "=2),
+            tip_length = 0.03,
+            margin_top = 0.3,
+            vjust = 0.5,
+            color="#000000") +
+  ggtitle("ANXA3") +
+  xlab(" ") +
+  ylab("Log-scaled counts") +
+  theme_classic(base_size = 16) +
+  theme(plot.title = element_text(size = 16))
+  #labs(color = "Pathology Group")
+
+ggarrange(a, p, s2, s, nrow=1)
+ggsave("../results/voomNSC_plotcounts.png", height=6, width=12)
+
+```
+
+
+
+
+
+The following figure depicts how patients cluster based on their gene expression profiles of this gene signature.  
+
+```{r}
+#set colours
+hmcol <- colorRampPalette(brewer.pal(9, "RdBu"))(100)
+sidecols <- c("#374F56", "#DF8F43", "#10A1D5")[vsd$pathology]
+
+
+# Use matrix to plot heatmap
+mat4 <- assay(vsd)[sg.voomNSC,]
+
+dfh<-data.frame(sample=as.character(colnames(mat4)))%>%
+                column_to_rownames("sample")
+
+dfh$Pathology <- vsd$pathology
+dfh$Sex <- vsd$sex
+
+
+pheatmap(mat4, 
+         scale="row",
+         color=colorRampPalette(c("navy", "white", "red"))(50),
+         annotation_col = dfh,
+         annotation_colors=list(Pathology=c("NAAP"="#374F56", "PA" = "#DF8F43", "SA"="#10A1D5"),
+                                Sex=c("Male"="#44bd9a", "Female"="#8d28bf")),
+         show_colnames = FALSE,
+         show_rownames = FALSE,
+         cutree_cols=3,
+         cluster_cols = TRUE,
+         treeheight_row = 0,
+         fontsize = 16,
+         filename="../results/voomNSC_hclust_2022.png",
+         height=4,
+         width=10)
+         
+
+```
+![](../results/voomNSC_hclust_2022.png)
+
+
+
+
+### F. Clustering  based on Endotoxin Tolerance signature
+
+Of the 103 genes in the signature, 35 were found to be DE between PA and control. The following clustering is based on the overlapping genes.
+
+```{r ET_signature}
+ET_sig <- read_csv("/mnt/data/signatures/EndotoxinToleranceSignature_GEx.csv")
+missing <- setdiff(ET_sig$ensembl_gene_id, rownames(assay(vsd)))
+common_ET <- intersect(ET_sig$ensembl_gene_id, rownames(assay(vsd)))
+overlap_with_PA_degenes <- intersect(ET_sig$ensembl_gene_id, rownames(degenes_PA))
+
+#Get HGNC names from biomart
+ensembl= useMart("ensembl",
+                 host="www.ensembl.org",
+                 ensemblRedirect = FALSE)
+ensembl=useDataset("hsapiens_gene_ensembl", mart=ensembl)
+et.bm <- getBM(attributes=c("ensembl_gene_id","hgnc_symbol"),
+      filters=("ensembl_gene_id"),
+      values=overlap_with_PA_degenes,
+      mart=ensembl,
+      useCache = FALSE)
+
+mat4 <- as.data.frame(assay(vsd)[overlap_with_PA_degenes,])
+
+mat4 <- rownames_to_column(mat4, var="ensembl_gene_id")
+mat4 <- left_join(mat4, et.bm)
+mat4 <- column_to_rownames(mat4, var="hgnc_symbol") %>%
+  dplyr::select(-ensembl_gene_id)
+
+# mat4 <- mat4 - rowMeans(mat4)
+# colnames(mat4) <- paste(vsd$sex)
+# 
+# png("../results/ET_2022.png")
+# heatmap.2(mat4, trace="none", col=hmcol, ColSideColors=sidecols, labRow = et.bm$hgnc_symbol, mar=c(10,2), scale="row", cexRow=1, labCol="", margins=c(12,8))
+# legend(x=0.9, y=1.1, xpd=TRUE, legend = c("NAAP","PA","SA"), col = c("#374F56", "#DF8F43", "#10A1D5"), lty= 1, lwd = 3, cex=.7)
+# dev.off()
+
+
+dfh<-data.frame(sample=as.character(colnames(mat4)))%>%
+                column_to_rownames("sample")
+
+dfh$Pathology <- vsd$pathology
+dfh$Sex <- vsd$sex
+
+
+pheatmap(mat4, 
+         scale="row",
+         color=colorRampPalette(c("navy", "white", "red"))(50),
+         annotation_col = dfh,
+         annotation_colors=list(Pathology=c("NAAP"="#374F56", "PA" = "#DF8F43", "SA"="#10A1D5"),
+                                Sex=c("Male"="#44bd9a", "Female"="#8d28bf")),
+         show_colnames = FALSE,
+         show_rownames = TRUE,
+         #cutree_cols=3,
+         cluster_cols = TRUE,
+         treeheight_row = 0,
+         fontsize = 16,
+         filename="../results/ET_2022.png",
+         width=10,
+         height=12)
+
+
+
+
+
+
+```
+![](../results/ET_2022.png)
+
+
+### G. Clustering based on Inflammatory signature
+
+```{r inf_signature}
+
+inf_sig <- read_csv("/mnt/data/signatures/InflammatorySignature_GEx.csv")
+missing_inf <- setdiff(inf_sig$ensembl_gene_id, rownames(assay(vsd)))
+common_inf <- intersect(inf_sig$ensembl_gene_id, rownames(assay(vsd)))
+overlap_with_PA_degenes_inf <- intersect(inf_sig$ensembl_gene_id, rownames(degenes_PA))
+
+#Get HGNC names from biomart
+ensembl= useMart("ensembl",
+                 host="www.ensembl.org",
+                 ensemblRedirect = FALSE)
+ensembl=useDataset("hsapiens_gene_ensembl", mart=ensembl)
+inf.bm <- getBM(attributes=c("ensembl_gene_id","hgnc_symbol"),
+      filters=("ensembl_gene_id"),
+      values=overlap_with_PA_degenes_inf,
+      mart=ensembl,
+      useCache = FALSE)
+
+mat5 <- as.data.frame(assay(vsd)[overlap_with_PA_degenes_inf,])
+mat5 <- rownames_to_column(mat5, var="ensembl_gene_id")
+mat5 <- left_join(mat5, inf.bm)
+mat5 <- column_to_rownames(mat5, var="hgnc_symbol") %>%
+  dplyr::select(-ensembl_gene_id)
+
+# mat5 <- mat5 - rowMeans(mat5)
+# 
+# png("../results/Inf_2022.png")
+# heatmap.2(mat5, trace="none", col=hmcol, ColSideColors=sidecols, labRow = inf.bm$hgnc_symbol, mar=c(10,2), scale="row", cexRow=1, labCol="", margins=c(12,8))
+# legend(x=0.9, y=1.2, xpd=TRUE, legend = c("NAAP","PA","SA"), col = c("#374F56", "#DF8F43", "#10A1D5"), lty= 1, lwd = 3, cex=.7)
+# dev.off()
+
+
+
+
+dfh<-data.frame(sample=as.character(colnames(mat5)))%>%
+                column_to_rownames("sample")
+
+dfh$Pathology <- vsd$pathology
+dfh$Sex <- vsd$sex
+
+pheatmap(mat5, 
+         scale="row",
+         color=colorRampPalette(c("navy", "white", "red"))(50),
+         annotation_col = dfh,
+         annotation_colors=list(Pathology=c("NAAP"="#374F56", "PA" = "#DF8F43", "SA"="#10A1D5"),
+                                Sex=c("Male"="#44bd9a", "Female"="#8d28bf")),
+         show_colnames = FALSE,
+         show_rownames = TRUE,
+         #cutree_cols=3,
+         cluster_cols = TRUE,
+         treeheight_row = 0,
+         fontsize = 16, filename="../results/Inf_2022.png",
+         width=10,
+         height=12)
+
+```
+
+![](../results/Inf_2022.png)
+
+
+# Session Info
+```{r}
+sessionInfo()
+```
