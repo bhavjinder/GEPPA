@@ -150,42 +150,49 @@ PCA plot after correcting for library prep batch:
 ```{r pca_corrected}
 
 # Remove library prep batch effect
-assay(vsd) <- limma::removeBatchEffect(assay(vsd),vsd$lib_prep_batch)
+assay(vsd) <- limma::removeBatchEffect(assay(vsd),
+                                       vsd$lib_prep_batch,
+                                       design=model.matrix(~vsd$pathology))
 
-# Visualize using PCA
-data <- plotPCA(vsd, intgroup=c("pathology","sex","age","lib_prep_batch"), returnData=TRUE)
-percentVar <- round(100 * attr(data, "percentVar"))
 
-plot <- ggplot(data, aes(PC1, PC2, ID, color=pathology, fill=pathology, shape=sex)) +
+
+prin_comp <- prcomp(t(assay(vsd)))
+summary(prin_comp)
+eig.val<-get_eigenvalue(prin_comp)
+fviz_eig(prin_comp, col.var="blue",
+         xlab="Principal component (PC)",
+         ylab="Percentage of variance explained", 
+         ggtheme=theme_minimal(base_size=18))
+ggsave("../results/PCA_scree_2023.pdf", width=7, height=5)
+
+components <- prin_comp[["x"]]
+components <- data.frame(components)
+components = cbind(components, vsd$pathology)
+components = cbind(components, vsd$sex)
+
+eigs <- prin_comp$sdev^2
+percVar.PC1 = round((eigs[1] / sum(eigs)) * 100, digits=0)
+percVar.PC2 = round((eigs[2] / sum(eigs)) * 100, digits=0)
+
+plot3 <- ggplot(components, aes(PC1, PC2, color=vsd$pathology, fill=vsd$pathology, shape=vsd$sex)) +
   scale_shape_manual(values=c(22,24), 
                      name="Sex") +
   geom_point(size=3) +
- # geom_text(aes(label=name), size=3, hjust=0.5, vjust=1.5) +
   scale_fill_manual(values=mycols, 
-                    labels=c("NAAP","PA","SA"),
+                    labels=c("SA","PA","NAAP"),
                     name="Pathology") +
   scale_color_manual(values=mycols, 
-                    labels=c("NAAP","PA","SA"),
+                    labels=c("SA","PA","NAAP"),
                     name="Pathology") +
-  xlab(paste0("PC1: ",percentVar[1],"% variance")) +
-  ylab(paste0("PC2: ",percentVar[2],"% variance")) +
+  xlab(paste0("PC1: ", percVar.PC1,"% variance")) +
+  ylab(paste0("PC2: ", percVar.PC2,"% variance")) +
   guides( color = guide_legend(order=1), 
           shape= guide_legend(order=2),
           fill= FALSE) +
-  theme_bw()
-plot
-ggsave("../results/PCA_corrected_lib_prep_batch_2022.png")
+  theme_bw(base_size=16)
 
-
-```
-
-
-
-```{r pcatools, eval=FALSE}
-
-p <- pca(vsd, metadata = colData(ddsHTSeq))
-
-screeplot(p, axisLabSize = 18, titleLabSize = 22)
+plot3
+ggsave("../results/PCA_corrected_lib_prep_batch_2023.pdf", width=7, height=4)
 
 ```
 
@@ -194,29 +201,27 @@ screeplot(p, axisLabSize = 18, titleLabSize = 22)
 The figure below is generated from hierarchical clustering based on the euclidean distance of normalized gene expression counts across the samples :
 
 ```{r clustering}
-#set colours
-hmcol <- colorRampPalette(brewer.pal(9, "RdBu"))(100)
-sidecols <- mycols[vsd$pathology]
 
 # Create a heatmap comparing the distance between samples based on the normalized log2foldchange of DE genes
 # dist is a distance matrix computation to measure distance between the rows of a data matrix (sample to sample distance in this case)
 # t returns the transpose of a matrix/data.frame (ie. switch the rows and columns)
 # assay is part of SummarizedExperiment object, matrix-like container, rows represent featuers (eg. genes, transcripts) and columns represent samples
+
+mycols = c("NAAP"="#10A1D5", "PA" = "#DF8F43", "SA"="#374F56")
 distsRL <- dist(t(assay(vsd)))
 mat <- as.matrix(distsRL)
-rownames(mat) <- colnames(mat) <- with(colData(ddsHTSeq), paste(sex))
+rownames(mat) <- colnames(mat) <- paste(vsd$pathology)
 
-heatmap.2(mat, trace="none", 
-          col=rev(hmcol), 
-          ColSideColors=sidecols, 
-          labRow=TRUE, 
-          mar=c(10,2), 
-          key.title="Legend")
-legend(x=-0.1, y=0.95, 
-       xpd=TRUE, 
-       legend = c("NAAP","PA","SA"), 
-       col = mycols, 
-       lty= 1, lwd = 5, cex=.7)
+hc=hclust(distsRL, method="ward.D2")
+hc$labels <- vsd$pathology
+
+dend <- as.dendrogram(hc)
+colors_to_use <- mycols[hc$labels]
+colors_to_use <- colors_to_use[order.dendrogram(dend)]
+labels_colors(dend) <- colors_to_use
+plot(dend, horiz=TRUE)
+ggsave("../results/Hclust_wardD2.pdf", width=3, height=8)
+
 ```
 
 
