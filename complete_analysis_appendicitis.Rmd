@@ -1,7 +1,7 @@
 ---
 title: "Appendicitis - Complete Analysis"
 author: "Bhavjinder Kaur Dhillon"
-date: "Feb 10, 2022"
+date: "November 2, 2023"
 output:
   html_document:
     toc: true
@@ -72,6 +72,10 @@ samples$seq_batch <- factor(samples$seq_batch)
 samples$lib_prep_batch <- factor(samples$lib_prep_batch)
 samples$antibiotics_before_blood_drawn <- factor(samples$antibiotics_before_blood_drawn)
 samples$pathology_mod2 <- factor(samples$pathology_mod2)
+
+# Center and scale age and weight
+samples$age <- scale(samples$age, center=TRUE)
+samples$weight <- scale(samples$weight, center=TRUE)
 
 
 ggplot(samples, aes(x=age,fill=pathology)) +
@@ -193,6 +197,23 @@ plot3 <- ggplot(components, aes(PC1, PC2, color=vsd$pathology, fill=vsd$patholog
 
 plot3
 ggsave("../results/PCA_corrected_lib_prep_batch_2023.pdf", width=7, height=4)
+
+```
+```{r second_pca}
+
+size_range <- range(vsd$age) / max(vsd$age) * 4
+
+plot5 <- ggplot(components, aes(PC1, PC2, size=vsd$age, fill=vsd$weight)) +
+  geom_point(aes(fill=vsd$weight), shape=21) +
+  scale_fill_gradientn(colours = c("white", "yellow", "orange","darkred"), 
+                         name="Weight (kg)") +
+  scale_size_continuous(range = size_range, name="Age") + 
+  xlab(paste0("PC1: ", percVar.PC1,"% variance")) +
+  ylab(paste0("PC2: ", percVar.PC2,"% variance")) +
+  theme_bw(base_size=16)
+plot5
+
+ggsave("../results/PCA_Age_Weight.pdf", width=7, height=4)
 
 ```
 
@@ -591,51 +612,67 @@ sigora_all$source <- factor(sigora_all$source,
                                        "PA_vs_SA", 
                                        "PA_vs_ALL"))
 
-sigora_all %>%
-  mutate(Pathway=fct_reorder(description, Bonferroni, .desc=TRUE)) %>%
-  ggplot(aes(source, Pathway, level_1, fill=Direction, shape=Direction)) +
-  geom_point(size = 3) +
-  scale_fill_manual(values=c("Up-regulated"="#d44660", "Down-regulated"="#43a2a3")) +
-  scale_shape_manual(values=c("Up-regulated"=24, "Down-regulated"=25)) +
+
+sigora_all_fct <- sigora_all %>%
+  mutate(Pathway=fct_reorder(description, Bonferroni, .desc=TRUE))
+sigora_all_fct$Direction <- factor(sigora_all_fct$Direction)
+sigora_all_fct$Direction <- fct_relevel(sigora_all_fct$Direction, "Up-regulated", "Down-regulated")
+sigora_all_fct <- sigora_all_fct %>%
+  mutate(GeneRatio = successes / PathwaySize) %>%
+  mutate(BgRatio = sample.size / N) %>%
+  mutate(Enrichment = GeneRatio / BgRatio)
+
+
+
+sigora_all_fct %>%
+  ggplot(aes(source, Pathway, level_1, color=Bonferroni, Enrichment)) +
+  geom_point(aes(size =Enrichment)) +
+  scale_size_continuous(name="Enrichment ratio") +
+  scale_color_continuous(name="Adjusted Pvalue") + 
+  scale_y_discrete(labels = function(x) str_wrap(x, width = 90)) +
   labs(x = "", y = "", title = "") +
-  #scale_y_discrete(labels = function(x) str_wrap(x, width=80)) +
-  theme(axis.text.x = element_text(size=14, angle = 45, hjust = 1), 
-         axis.text.y = element_text(size=14),
-        strip.text.y = element_text(angle = 0, size=12)) +
-  facet_grid (rows=vars(level_1), scales="free_y", space="free_y")
-ggsave("../pathway/SIGORA_directionality.png", width=13, height=16)
-
-
-sigora_all %>%
-  filter(level_1=="Immune System") %>%
-  mutate(Pathway=fct_reorder(description, Bonferroni, .desc=TRUE)) %>%
-  ggplot(aes(source, Pathway, level_1, fill=Direction, shape=Direction)) +
-  geom_point(size = 3) +
-  scale_fill_manual(values=c("Up-regulated"="#d44660", "Down-regulated"="#43a2a3")) +
-  scale_shape_manual(values=c("Up-regulated"=24, "Down-regulated"=25)) +
-  labs(x = "", y = "", title = "") +
-  #scale_y_discrete(labels = function(x) str_wrap(x, width=80)) +
-  theme(axis.text.x = element_text(size=14, angle = 45, hjust = 1), 
-         axis.text.y = element_text(size=14),
-        strip.text.y = element_text(angle = 0, size=12))
-ggsave("../pathway/SIGORA_ImmuneSystemPathwaysOnly.png", width=11, height=7)
+  theme(text = element_text(family = "Arial"),
+        legend.title = element_text(size=18),
+    legend.text = element_text(size=16),
+        axis.text.x = element_text(size=16, angle = 45, hjust = 1), 
+        axis.text.y = element_text( size=16, lineheight=0.6),
+        strip.text.y = element_text(angle = 0, size=16, lineheight=0.6),
+        strip.text.x = element_text(size=18)) + 
+  facet_grid(cols=vars(Direction), 
+             rows=vars(level_1), 
+             scales="free_y", 
+             space="free_y",
+             labeller=label_wrap_gen(width=35))
+  
+ggsave("../pathway/SIGORA__Directionality_ALL.png", width=18, height=20)
 
 
 
-sigora_all %>%
+
+# Select subset of pathways (immune system and signal transduction only)
+sigora_all_fct %>%
   filter(level_1=="Immune System" | level_1=="Signal Transduction") %>%
-  mutate(Pathway=fct_reorder(description, Bonferroni, .desc=TRUE)) %>%
-  ggplot(aes(source, Pathway, level_1, fill=Direction, shape=Direction)) +
-  geom_point(size = 3) +
-  scale_fill_manual(values=c("Up-regulated"="#d44660", "Down-regulated"="#43a2a3")) +
-  scale_shape_manual(values=c("Up-regulated"=24, "Down-regulated"=25)) +
+  ggplot(aes(source, Pathway, level_1, color=Bonferroni, Enrichment)) +
+  geom_point(aes(size =Enrichment)) +
+  scale_size_continuous(name="Enrichment ratio") +
+  scale_color_continuous(name="Adjusted Pvalue") + 
+  scale_y_discrete(labels = function(x) str_wrap(x, width = 90)) +
   labs(x = "", y = "", title = "") +
-  #scale_y_discrete(labels = function(x) str_wrap(x, width=80)) +
-  theme(axis.text.x = element_text(size=14, angle = 45, hjust = 1), 
-         axis.text.y = element_text(size=14),
-        strip.text.y = element_text(angle = 0, size=14)) + 
-   facet_grid(rows=vars(level_1), scales="free_y", space="free_y")
-ggsave("../pathway/SIGORA_ImmuneSystemSigTransOnly.png", width=12, height=10)
+  theme(text = element_text(family = "Arial"),
+        legend.title = element_text(size=18),
+    legend.text = element_text(size=16),
+        axis.text.x = element_text(size=16, angle = 45, hjust = 1), 
+        axis.text.y = element_text( size=16, lineheight=0.6),
+        strip.text.y = element_text(angle = 90, size=16),
+        strip.text.x = element_text(size=18)) + 
+  facet_grid(rows=vars(Direction), 
+             cols=vars(level_1), 
+             scales="free_y", 
+             space="free_y",
+             labeller=label_wrap_gen(width=10))
+  
+ggsave("../pathway/SIGORA__ImmuneSystemSigTransOnly.png", width=16, height=10)
+ggsave("../pathway/SIGORA__ImmuneSystemSigTransOnly.pdf", width=16, height=10)
 
 
 
@@ -1070,6 +1107,469 @@ pheatmap(mat5,
 ```
 
 ![](../results/Inf_2022.png)
+
+
+
+### DE analysis including age/weight
+
+Age and weight were included as covariates in the DESeq2 model in order to assess if there is any impact of age/weight on severity of appendicitis. 
+
+### PA vs. NAAP, SA vs. NAAP (age & weight cov)
+
+```{r deseq2_analysis_age_weight, cache=TRUE}
+
+# Read count data into DESeq object
+ddsHTSeqV2 <- DESeqDataSetFromHTSeqCount(sampleTable = samples, 
+                                       directory = ctDir, 
+                                       design = ~ lib_prep_batch + sex + age + weight + pathology)
+
+# Removing globin genes from htseq count matrix
+exclude <- c("ENSG00000206172", 
+             "ENSG00000188536", 
+             "ENSG00000244734", 
+             "ENSG00000223609", 
+             "ENSG00000213934", 
+             "ENSG00000196565")
+ddsHTSeqV2 <- ddsHTSeqV2[(!(rownames(ddsHTSeqV2) %in% exclude)),]
+
+# Remove genes with low counts
+keep <- rowSums(counts(ddsHTSeqV2)>10) >= 24
+ddsHTSeqV2 <- ddsHTSeqV2[keep,]
+
+# Relevel the controls
+ddsHTSeqV2$pathology <- relevel(ddsHTSeqV2$pathology, ref="NAAP")
+
+# Run DESeq2
+ddsV2 <- DESeq(ddsHTSeqV2, betaPrior = FALSE, parallel=TRUE)
+resV2 <- results(ddsV2, parallel=TRUE)
+
+# Determine DE genes
+# contrasts should come from resultsNames(dds)
+res_dds_SAV2 <- results(ddsV2, contrast = list("pathology_SA_vs_NAAP"))
+res_dds_PAV2 <- results(ddsV2, contrast = list("pathology_PA_vs_NAAP"))
+res_dds_age <- results(ddsV2, contrast = list("age"))
+res_dds_weight <- results(ddsV2, contrast = list("weight"))
+
+# Order the results by q-value
+res_ord_SAV2 <- res_dds_SA[order(res_dds_SAV2$padj),]
+res_ord_PAV2 <- res_dds_PA[order(res_dds_PAV2$padj),]
+res_ord_age <- res_dds_age[order(res_dds_age$padj),]
+res_ord_weight <- res_dds_weight[order(res_dds_weight$padj),]
+
+# Add two additional columns: absolute log2 fold change (abslfc), and fold change (FC)
+res_ord_SAV2$abslfc <- abs(res_ord_SAV2$log2FoldChange)
+res_ord_PAV2$abslfc <- abs(res_ord_PAV2$log2FoldChange)
+res_ord_age$abslfc <- abs(res_ord_age$log2FoldChange)
+res_ord_weight$abslfc <- abs(res_ord_weight$log2FoldChange)
+
+res_ord_SAV2$fc <- (sign(res_ord_SAV2$log2FoldChange) * (2^ res_ord_SAV2$abslfc))
+res_ord_PAV2$fc <- (sign(res_ord_PAV2$log2FoldChange) * (2^ res_ord_PAV2$abslfc))
+res_ord_age$fc <- (sign(res_ord_age$log2FoldChange) * (2^ res_ord_age$abslfc))
+res_ord_weight$fc <- (sign(res_ord_weight$log2FoldChange) * (2^ res_ord_weight$abslfc))
+
+#Convert DE gene ensembl IDs to HGNC symbols
+res_ord_SAV2.hgnc <- as.matrix(rownames(res_ord_SAV2))
+symbols <- mapIds(org.Hs.eg.db, keys = res_ord_SAV2.hgnc,
+    column = c('SYMBOL'), keytype = 'ENSEMBL')
+#symbols <- symbols[!is.na(symbols)]
+symbols <- symbols[match(res_ord_SAV2.hgnc, names(symbols))]
+res_ord_SAV2$hgnc <- symbols
+
+res_ord_PAV2.hgnc <- as.matrix(rownames(res_ord_PAV2))
+symbols <- mapIds(org.Hs.eg.db, keys = res_ord_PAV2.hgnc,
+    column = c('SYMBOL'), keytype = 'ENSEMBL')
+#symbols <- symbols[!is.na(symbols)]
+symbols <- symbols[match(res_ord_PAV2.hgnc, names(symbols))]
+res_ord_PAV2$hgnc <- symbols
+
+res_ord_age.hgnc <- as.matrix(rownames(res_ord_age))
+symbols <- mapIds(org.Hs.eg.db, keys = res_ord_age.hgnc,
+    column = c('SYMBOL'), keytype = 'ENSEMBL')
+symbols <- symbols[match(res_ord_age.hgnc, names(symbols))]
+res_ord_age$hgnc <- symbols
+
+res_ord_weight.hgnc <- as.matrix(rownames(res_ord_weight))
+symbols <- mapIds(org.Hs.eg.db, keys = res_ord_weight.hgnc,
+    column = c('SYMBOL'), keytype = 'ENSEMBL')
+symbols <- symbols[match(res_ord_weight.hgnc, names(symbols))]
+res_ord_weight$hgnc <- symbols
+
+# Write initial results to a .csv file
+write.csv(res_ord_SAV2, file="../deseq2/Results_SA_vs_no_model2.csv")
+write.csv(res_ord_PAV2, file="../deseq2/Results_PA_vs_no_model2.csv")
+write.csv(res_ord_age, file="../deseq2/Results_age_model2.csv")
+write.csv(res_ord_weight, file="../deseq2/Results_weight_model2.csv")
+
+# Filter DE gene list for ((fc >= 1.5 | fc <= -1.5) and q-value < 0.05)
+degenes_SAV2 <- as.data.frame(subset(res_ord_SAV2, padj<=0.05 & (fc >= 1.5 | fc <= -1.5)))
+degenes_PAV2 <- as.data.frame(subset(res_ord_PAV2, padj<=0.05 & (fc >= 1.5 | fc <= -1.5)))
+degenes_age <- as.data.frame(subset(res_ord_age, padj<=0.05 & (fc >= 1.5 | fc <= -1.5)))
+degenes_weight <- as.data.frame(subset(res_ord_weight, padj<=0.05 & (fc >= 1.5 | fc <= -1.5)))
+
+# Write filtered DE genes results to a .csv file
+write.csv(degenes_SAV2, file="../deseq2/DEGenes_SA_vs_no_model2.csv")
+write.csv(degenes_PAV2, file="../deseq2/DEGenes_PA_vs_no_model2.csv")
+write.csv(degenes_age, file="../deseq2/DEGenes_age_model2.csv")
+write.csv(degenes_weight, file="../deseq2/DEGenes_weight_model2.csv")
+
+
+```
+
+### PA vs. SA+NAAP (age & weight cov)
+
+```{r deseq2_pa_vs_sanaap_age_weight, cache=TRUE}
+
+# Read count data into DESeq object
+ddsHTSeq_pa_vs_allV2 <- DESeqDataSetFromHTSeqCount(sampleTable = samples, 
+                                                 directory = ctDir, 
+                                                 design = ~ lib_prep_batch + sex + age + weight + pathology_mod2)
+
+# Removing globin genes from htseq count matrix
+exclude <- c("ENSG00000206172", 
+             "ENSG00000188536", 
+             "ENSG00000244734", 
+             "ENSG00000223609", 
+             "ENSG00000213934", 
+             "ENSG00000196565")
+ddsHTSeq_pa_vs_allV2 <- ddsHTSeq_pa_vs_allV2[(!(rownames(ddsHTSeq_pa_vs_allV2) %in% exclude)),]
+
+# Remove low count genes
+keep_pa_vs_allV2 <- rowSums(counts(ddsHTSeq_pa_vs_allV2)>10) >= 24
+ddsHTSeq_pa_vs_allV2 <- ddsHTSeq_pa_vs_allV2[keep_pa_vs_allV2,]
+
+
+# Relevel the controls
+ddsHTSeq_pa_vs_allV2$pathology_mod2 <- relevel(ddsHTSeq_pa_vs_allV2$pathology_mod2, ref="SA_NAAP")
+
+# Run DESeq2
+dds_pa_vs_allV2 <- DESeq(ddsHTSeq_pa_vs_allV2, betaPrior = FALSE, parallel=TRUE)
+res_pa_vs_allV2 <- results(dds_pa_vs_allV2, parallel=TRUE)
+
+# Determine DE genes
+res_dds_pa_vs_allV2 <- results(dds_pa_vs_allV2, contrast = list("pathology_mod2_PA_vs_SA_NAAP"))
+
+# Order the results by q-value
+res_ord_pa_vs_allV2 <- res_dds_pa_vs_allV2[order(res_dds_pa_vs_allV2$padj),]
+
+# Add two additional columns: absolute log2 fold change (abslfc), and fold change (FC)
+res_ord_pa_vs_allV2$abslfc <- abs(res_ord_pa_vs_allV2$log2FoldChange)
+res_ord_pa_vs_allV2$fc <- (sign(res_ord_pa_vs_allV2$log2FoldChange) * (2^ res_ord_pa_vs_allV2$abslfc))
+
+#Convert DE gene ensembl IDs to HGNC symbols
+res_ord_pa_vs_allV2.hgnc <- as.matrix(rownames(res_ord_pa_vs_allV2))
+symbols <- mapIds(org.Hs.eg.db, keys = res_ord_pa_vs_allV2.hgnc,
+    column = c('SYMBOL'), keytype = 'ENSEMBL')
+#symbols <- symbols[!is.na(symbols)]
+symbols <- symbols[match(res_ord_pa_vs_allV2.hgnc, names(symbols))]
+res_ord_pa_vs_allV2$hgnc <- symbols
+
+
+
+# Write initial results to a .csv file
+write.csv(res_ord_pa_vs_allV2, file="../deseq2/Results_PA_vs_ALL_model2.csv")
+
+# Filter DE gene list for (fc >= 1.5 | fc <= -1.5) and q-value < 0.05
+degenes_pa_vs_allV2 <- as.data.frame(subset(res_ord_pa_vs_allV2, padj<=0.05 & (fc >= 1.5 | fc <= -1.5)))
+
+
+
+# Write filtered DE genes results to a .csv file
+write.csv(degenes_pa_vs_allV2, file="../deseq2/DEGenes_PA_vs_ALL_model2.csv")
+
+```
+
+
+
+```{r deseq2_sa_vs_pa_age_weight, cache=TRUE}
+
+# Read count data into DESeq object
+ddsHTSeq_sa_vs_paV2 <- DESeqDataSetFromHTSeqCount(sampleTable = samples, directory = ctDir, design = ~ lib_prep_batch + sex + age + weight + pathology)
+
+# Removing globin genes from htseq count matrix
+exclude <- c("ENSG00000206172", 
+             "ENSG00000188536", 
+             "ENSG00000244734", 
+             "ENSG00000223609", 
+             "ENSG00000213934", 
+             "ENSG00000196565")
+ddsHTSeq_sa_vs_paV2 <- ddsHTSeq_sa_vs_paV2[(!(rownames(ddsHTSeq_sa_vs_paV2) %in% exclude)),]
+
+# Remove low count genes
+keep_sa_vs_paV2 <- rowSums(counts(ddsHTSeq_sa_vs_paV2)>10) >= 24
+ddsHTSeq_sa_vs_paV2 <- ddsHTSeq_sa_vs_paV2[keep_sa_vs_paV2,]
+
+# Relevel the controls
+ddsHTSeq_sa_vs_paV2$pathology <- relevel(ddsHTSeq_sa_vs_paV2$pathology, ref="SA")
+
+# Run DESeq
+dds_sa_vs_paV2 <- DESeq(ddsHTSeq_sa_vs_paV2, betaPrior = FALSE, parallel=TRUE)
+res_sa_vs_paV2 <- results(dds_sa_vs_paV2, parallel=TRUE)
+
+# Determine DE genes
+res_dds_sa_vs_paV2 <- results(dds_sa_vs_paV2, contrast = list("pathology_PA_vs_SA"))
+
+# Order the results by q-value
+res_ord_sa_vs_paV2 <- res_dds_sa_vs_paV2[order(res_dds_sa_vs_paV2$padj),]
+
+# Add two additional columns: absolute log2 fold change (abslfc), and fold change (FC)
+res_ord_sa_vs_paV2$abslfc <- abs(res_ord_sa_vs_paV2$log2FoldChange)
+res_ord_sa_vs_paV2$fc <- (sign(res_ord_sa_vs_paV2$log2FoldChange) * (2^ res_ord_sa_vs_paV2$abslfc))
+
+#Convert DE gene ensembl IDs to HGNC symbols
+res_ord_sa_vs_paV2.hgnc <- as.matrix(rownames(res_ord_sa_vs_paV2))
+symbols <- mapIds(org.Hs.eg.db, keys = res_ord_sa_vs_paV2.hgnc,
+    column = c('SYMBOL'), keytype = 'ENSEMBL')
+#symbols <- symbols[!is.na(symbols)]
+symbols <- symbols[match(res_ord_sa_vs_paV2.hgnc, names(symbols))]
+res_ord_sa_vs_paV2$hgnc <- symbols
+
+
+# Write initial results to a .csv file
+write.csv(res_ord_sa_vs_paV2, file="../deseq2/Results_PA_vs_SA_model2.csv")
+
+# Filter DE gene list for ((fc >= 1.5 | fc <= -1.5) and q-value < 0.05)
+degenes_sa_vs_paV2 <- as.data.frame(subset(res_ord_sa_vs_paV2, padj<=0.05 & (fc >= 1.5 | fc <= -1.5)))
+
+
+
+
+# Write filtered DE genes results to a .csv file
+write.csv(degenes_sa_vs_paV2, file="../deseq2/DEGenes_PA_vs_SA_model2.csv")
+
+```
+
+
+
+###### Summary of DE genes identified when including age & weight as covariates:
+
+```{r summaryde_age_weight}
+
+summ_PAV2 <- degenes_PAV2 %>%
+  dplyr::count(fc>0) %>%
+  transmute(PA_vs_no=n)
+
+#summ_SA <- degenes_SA %>%
+#   dplyr::count(fc>0) %>%
+#   transmute(SA_vs_no=n)
+SA_vs_noV2 <- c(0,0)
+
+summ_PA_vs_SAV2 <- degenes_sa_vs_paV2 %>%
+ dplyr::count(fc>0) %>%
+ transmute(PA_vs_SA=n)
+# 
+# summ_app_vs_no <- degenes_app_vs_no %>%
+#  dplyr::count(fc>0) %>%
+#  transmute(Any_appy_vs_no=n)
+
+summ_pa_vs_allV2 <- degenes_pa_vs_allV2 %>%
+  dplyr::count(fc>0) %>%
+  transmute(PA_vs_All=n)
+
+
+summV2 <- cbind(SA_vs_noV2, summ_PAV2, summ_PA_vs_SAV2, summ_pa_vs_allV2)
+rownames(summV2) <- c("Number of down-regulated genes","Number of up-regulated genes")
+
+summV2 <- t(summV2)
+
+kable(summV2)
+
+
+```
+
+
+Are there any major changes after including age/weight as covariates? Did any key genes fall out? 
+
+### Pathway Enrichment Analysis
+
+Check if there are any major changes in enriched pathways as well. 
+
+```{r sigoraV2, cache=TRUE}
+
+######### PA vs no
+
+sigRes_PAV2 <- sigora(GPSrepo=load_data('reaH'), 
+                    queryList = rownames(degenes_PAV2), 
+                    level=4, markers=TRUE, 
+                    saveFile="../pathway/SIGORA_ReaH_PA_vs_NAAP_model2.csv")
+
+sigRes_PAV2$summary_results <- mutate(sigRes_PAV2$summary_results, source="PA_vs_NAAP") %>%
+  filter(Bonferroni<=0.05) 
+
+
+degenes_PAV2_up <- filter(degenes_PAV2, fc>0)
+degenes_PAV2_down <- filter(degenes_PAV2, fc<0)
+
+sigRes_PAV2_up <- sigora(GPSrepo=load_data('reaH'), 
+                    queryList = rownames(degenes_PAV2_up), 
+                    level=4, markers=TRUE, 
+                    saveFile="../pathway/SIGORA_ReaH_PA_vs_NAAP_UP_model2.csv")
+
+sigRes_PAV2_up$summary_results <- mutate(sigRes_PAV2_up$summary_results, source="PA_vs_NAAP") %>%
+  filter(Bonferroni<=0.05) %>%
+  mutate(Direction="Up-regulated")
+
+
+sigRes_PAV2_down <- sigora(GPSrepo=load_data('reaH'), 
+                    queryList = rownames(degenes_PAV2_down), 
+                    level=4, markers=TRUE, 
+                    saveFile="../pathway/SIGORA_ReaH_PA_vs_NAAP_DOWN_model2.csv")
+
+sigRes_PAV2_down$summary_results <- mutate(sigRes_PAV2_down$summary_results, source="PA_vs_NAAP") %>%
+  filter(Bonferroni<=0.05) %>%
+  mutate(Direction="Down-regulated")
+
+
+######## PA vs all
+
+
+sigRes_PA_vs_allV2 <- sigora(GPSrepo=load_data('reaH'), 
+                           queryList = rownames(degenes_pa_vs_allV2), 
+                           level=4, markers=TRUE, 
+                           saveFile="../pathway/SIGORA_ReaH_PA_vs_ALL_model2.csv")
+
+sigRes_PA_vs_allV2$summary_results <- mutate(sigRes_PA_vs_allV2$summary_results, source="PA_vs_ALL") %>%
+  filter(Bonferroni<=0.05) 
+
+degenes_PA_vs_allV2_up <- filter(degenes_pa_vs_allV2, fc>0)
+degenes_PA_vs_allV2_down <- filter(degenes_pa_vs_allV2, fc<0)
+
+sigRes_PA_vs_allV2_up <- sigora(GPSrepo=load_data('reaH'), 
+                           queryList = rownames(degenes_PA_vs_allV2_up), 
+                           level=4, markers=TRUE, 
+                           saveFile="../pathway/SIGORA_ReaH_PA_vs_ALL_UP_model2.csv")
+
+sigRes_PA_vs_allV2_up$summary_results <- mutate(sigRes_PA_vs_allV2_up$summary_results, source="PA_vs_ALL") %>%
+  filter(Bonferroni<=0.05) %>%
+  mutate(Direction="Up-regulated")
+
+
+sigRes_PA_vs_allV2_down <- sigora(GPSrepo=load_data('reaH'), 
+                           queryList = rownames(degenes_PA_vs_allV2_down), 
+                           level=4, markers=TRUE, 
+                           saveFile="../pathway/SIGORA_ReaH_PA_vs_ALL_DOWN_model2.csv")
+
+sigRes_PA_vs_allV2_down$summary_results <- mutate(sigRes_PA_vs_allV2_down$summary_results, source="PA_vs_ALL") %>%
+  filter(Bonferroni<=0.05) %>%
+  mutate(Direction="Down-regulated")
+
+
+
+######## PA vs SA
+
+
+sigRes_SAV2 <- sigora(GPSrepo=load_data('reaH'), 
+                 queryList = rownames(degenes_sa_vs_paV2), 
+                 level=4, markers=TRUE, 
+                 saveFile="../pathway/SIGORA_ReaH_PA_vs_SA_model2.csv")
+
+sigRes_SAV2$summary_results <- mutate(sigRes_SAV2$summary_results, source="PA_vs_SA") %>%
+  filter(Bonferroni<=0.05)
+
+
+degenes_PA_vs_SAV2_up <- filter(degenes_sa_vs_paV2, fc>0)
+degenes_PA_vs_SAV2_down <- filter(degenes_sa_vs_paV2, fc<0)
+
+sigResV2_up <- sigora(GPSrepo=load_data('reaH'), 
+                 queryList = rownames(degenes_PA_vs_SAV2_up), 
+                 level=4, markers=TRUE, 
+                 saveFile="../pathway/SIGORA_ReaH_PA_vs_SA_UP_model2.csv")
+
+sigResV2_up$summary_results <- mutate(sigResV2_up$summary_results, source="PA_vs_SA") %>%
+  filter(Bonferroni<=0.05) %>%
+  mutate(Direction="Up-regulated")
+
+sigResV2_down <- sigora(GPSrepo=load_data('reaH'), 
+                 queryList = rownames(degenes_PA_vs_SAV2_down), 
+                 level=4, markers=TRUE, 
+                 saveFile="../pathway/SIGORA_ReaH_PA_vs_SA_DOWN_model2.csv")
+
+sigResV2_down$summary_results <- mutate(sigResV2_down$summary_results, source="PA_vs_SA") %>%
+  filter(Bonferroni<=0.05) %>%
+  mutate(Direction="Down-regulated")
+
+
+######### Combine
+
+sigora_allV2 <- bind_rows(sigRes_PAV2_up$summary_results, 
+                        sigRes_PAV2_down$summary_results,
+                        sigResV2_up$summary_results,
+                        sigResV2_down$summary_results,
+                        sigRes_PA_vs_allV2_up$summary_results,
+                        sigRes_PA_vs_allV2_down$summary_results)
+
+sigora_allV2 <- left_join(sigora_allV2, reactome_HSA_L1_L2, by="pathwy.id")
+
+sigora_allV2$source <- factor(sigora_allV2$source, 
+                            levels = c("PA_vs_NAAP", 
+                                       "PA_vs_SA", 
+                                       "PA_vs_ALL"))
+
+
+sigora_allV2_fct <- sigora_allV2 %>%
+  mutate(Pathway=fct_reorder(description, Bonferroni, .desc=TRUE))
+sigora_allV2_fct$Direction <- factor(sigora_allV2_fct$Direction)
+sigora_allV2_fct$Direction <- fct_relevel(sigora_allV2_fct$Direction, "Up-regulated", "Down-regulated")
+sigora_allV2_fct <- sigora_allV2_fct %>%
+  mutate(GeneRatio = successes / PathwaySize) %>%
+  mutate(BgRatio = sample.size / N) %>%
+  mutate(Enrichment = GeneRatio / BgRatio)
+
+
+
+sigora_allV2_fct %>%
+  ggplot(aes(source, Pathway, level_1, color=Bonferroni, Enrichment)) +
+  geom_point(aes(size =Enrichment)) +
+  scale_size_continuous(name="Enrichment ratio") +
+  scale_color_continuous(name="Adjusted Pvalue") + 
+  scale_y_discrete(labels = function(x) str_wrap(x, width = 90)) +
+  labs(x = "", y = "", title = "") +
+  theme(text = element_text(family = "Arial"),
+        legend.title = element_text(size=18),
+    legend.text = element_text(size=16),
+        axis.text.x = element_text(size=16, angle = 45, hjust = 1), 
+        axis.text.y = element_text( size=16, lineheight=0.6),
+        strip.text.y = element_text(angle = 0, size=16, lineheight=0.6),
+        strip.text.x = element_text(size=18)) + 
+  facet_grid(cols=vars(Direction), 
+             rows=vars(level_1), 
+             scales="free_y", 
+             space="free_y",
+             labeller=label_wrap_gen(width=35))
+  
+ggsave("../pathway/SIGORA_V2_Directionality_ALL.png", width=18, height=20)
+
+
+
+
+# Select subset of pathways (immune system and signal transduction only)
+sigora_allV2_fct %>%
+  filter(level_1=="Immune System" | level_1=="Signal Transduction") %>%
+  ggplot(aes(source, Pathway, level_1, color=Bonferroni, Enrichment)) +
+  geom_point(aes(size =Enrichment)) +
+  scale_size_continuous(name="Enrichment ratio") +
+  scale_color_continuous(name="Adjusted Pvalue") + 
+  scale_y_discrete(labels = function(x) str_wrap(x, width = 90)) +
+  labs(x = "", y = "", title = "") +
+  theme(text = element_text(family = "Arial"),
+        legend.title = element_text(size=18),
+    legend.text = element_text(size=16),
+        axis.text.x = element_text(size=16, angle = 45, hjust = 1), 
+        axis.text.y = element_text( size=16, lineheight=0.6),
+        strip.text.y = element_text(angle = 90, size=16),
+        strip.text.x = element_text(size=18)) + 
+  facet_grid(rows=vars(Direction), 
+             cols=vars(level_1), 
+             scales="free_y", 
+             space="free_y",
+             labeller=label_wrap_gen(width=10))
+  
+ggsave("../pathway/SIGORA_V2_ImmuneSystemSigTransOnly.png", width=16, height=10)
+ggsave("../pathway/SIGORA_V2_ImmuneSystemSigTransOnly.pdf", width=16, height=10)
+
+
+```
+
+
 
 
 # Session Info
